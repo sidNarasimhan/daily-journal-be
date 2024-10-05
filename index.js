@@ -26,7 +26,7 @@ const MathReasoning = z.object({
   message: z.string(),
 });
 const client = new Client({
-  user: "daily_journal_db",
+  user: "daily_journal_db_user",
   host: "dpg-cs0odprtq21c73eh98d0-a",
   database: "daily_journal_db",
   password: "01GLE75PwMwPvAS6poMMuysQMiD9mrAA",
