@@ -1,4 +1,6 @@
 // server.js
+import dotenv from 'dotenv';
+dotenv.config();
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
@@ -9,7 +11,10 @@ import cosineSimilarity from "cosine-similarity";
 
 const { Client } = pkg;
 
-const openai = new OpenAI();
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 
 const MathReasoning = z.object({
   health: z.number(),
