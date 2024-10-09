@@ -26,10 +26,10 @@ const MathReasoning = z.object({
   message: z.string(),
 });
 const client = new Client({
-  user: "daily_journal_db_user",
-  host: "dpg-cs0odprtq21c73eh98d0-a",
-  database: "daily_journal_db",
-  password: "01GLE75PwMwPvAS6poMMuysQMiD9mrAA",
+  user: "postgres",
+  host: "database-1.cz42g8gwq283.eu-north-1.rds.amazonaws.com",
+  database: "postgres",
+  password: "p6AStlYnGWsGJVAyAXZR",
   port: 5432, // default PostgreSQL port
 });
 
