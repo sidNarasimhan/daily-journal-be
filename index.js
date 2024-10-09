@@ -69,7 +69,7 @@ function dateToWords(date) {
 
 app.post("/api/ask", async (req, res) => {
   const  question  = req.body.entry;
-  console.log(question)
+  
   try {
     // Step 1: Generate an embedding for the question
     const questionEmbedding = await openai.embeddings.create({
@@ -96,7 +96,7 @@ app.post("/api/ask", async (req, res) => {
 
     // Step 5: Select the top 5 most relevant journal entries
     const topEntries = similarities.slice(0, 10).map(entry => `${entry.journal_entry}`);
-    console.log(topEntries)
+    
     // Step 6: Prepare the prompt with the most relevant entries and the user's question
     const context = topEntries.join("\n");
     const prompt = `Context: ${context}\n\nQuestion: ${question}\nAnswer:`;
@@ -124,7 +124,7 @@ app.post("/api/ask", async (req, res) => {
 
 app.post("/api/daily-entry", async (req, res) => {
   const { entry } = req.body; // Get the journal entry from request body
-  console.log(process.env.OPENAI_API_KEY)
+  
   async function main() {
     try {
       // Send journal entry to ChatGPT
@@ -180,7 +180,7 @@ app.post("/api/daily-entry", async (req, res) => {
           embedding = EXCLUDED.embedding
         RETURNING *;
       `;
-      console.log(updated_stats)
+     
       const values = [
         updated_stats.health!=0?updated_stats.health:result.rows[0].health,
         updated_stats.energy!=0?updated_stats.energy:result.rows[0].energy,
@@ -237,7 +237,7 @@ app.get("/api/stats", async (req, res) => {
       }
       resultResponse= result.rows[0]
       resultResponse.image = image
-      console.log(resultResponse)
+      
       res.status(200).json(resultResponse); // Return today's stats from DB
     }
   } catch (error) {
