@@ -124,7 +124,7 @@ app.post("/api/ask", async (req, res) => {
 
 app.post("/api/daily-entry", async (req, res) => {
   const { entry } = req.body; // Get the journal entry from request body
-
+  console.log(process.env.OPENAI_API_KEY)
   async function main() {
     try {
       // Send journal entry to ChatGPT
