@@ -38,7 +38,7 @@ client.connect();
 const app = express();
 const port = 5000;
 const corsOptions = {
-  origin: 'https://daily-journal-h2xldtf2r-sidharths-projects-bdabd44d.vercel.app/', // replace with your frontend URL
+  origin: 'https://daily-journal-ae98vvutx-sidharths-projects-bdabd44d.vercel.app', // replace with your frontend URL
   optionsSuccessStatus: 200,
 };
 
