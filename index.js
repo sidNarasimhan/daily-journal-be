@@ -123,20 +123,28 @@ app.post("/api/ask", async (req, res) => {
 
 
 app.post("/api/daily-entry", async (req, res) => {
-  const { entry } = req.body; // Get the journal entry from request body
+  const { entry, water, smoke, porn, workout } = req.body;
   
   async function main() {
     try {
-      // Send journal entry to ChatGPT
+      // Validate inputs
+      if (typeof water !== 'number' || typeof smoke !== 'number' ||
+          typeof porn !== 'boolean' || typeof workout !== 'boolean') {
+        return res.status(400).json({ error: "Invalid input types" });
+      }
+
+      // Fetch the most recent stats
       const result = await client.query(
         "SELECT * FROM stats ORDER BY date DESC LIMIT 1;"
       );
+
+      // Send journal entry to ChatGPT
       const completion = await openai.beta.chat.completions.parse({
         model: "gpt-4o-2024-08-06",
         messages: [
           {
             role: "system",
-            content: `You are my personal life coach who helps me become the best version of myself. You are harsh to me when i do things that are not progrssing my life and celebrate the things that do. You will be provided a daily journal entry which you need to analyse and respond to, along with updating some stats. The stats are health,energy,mental,charisma,intellect,skill. Analyze the given journal entry and current stats and respond with a JSON object for stats between 0-100 skill,intellect,charisma,health,energy,mental. Also include a one-line response in the JSON object parameter message. If the entry is not detailed enough, ask for more information in the message, and return the stats as null. Your tone is one of a friend who is interested in the person's day. But you are also agressive and want me to improve my stats.`,
+            content: `You are my personal life coach who helps me become the best version of myself. You are harsh to me when i do things that are not progressing my life and celebrate the things that do. You will be provided a daily journal entry which you need to analyse and respond to, along with updating some stats. The stats are health,energy,mental,charisma,intellect,skill. Analyze the given journal entry and current stats and respond with a JSON object for stats between 0-100 skill,intellect,charisma,health,energy,mental. Also include a one-line response in the JSON object parameter message. If the entry is not detailed enough, ask for more information in the message, and return the stats as null. Your tone is one of a friend who is interested in the person's day. But you are also aggressive and want me to improve my stats.`,
           },
           {
             role: "user",
@@ -147,7 +155,7 @@ app.post("/api/daily-entry", async (req, res) => {
       });
 
       const updated_stats = completion.choices[0].message.parsed;
-      updated_stats.image=1
+      updated_stats.image = 1;
       // Determine the image to show based on the stats (for your frontend)
       if (updated_stats.health > 80) {
         updated_stats.image = 2;
@@ -164,10 +172,14 @@ app.post("/api/daily-entry", async (req, res) => {
   
       const embedding = embeddingResponse.data[0].embedding; 
 
-      // Insert journal entry and updated stats into the database
+      // Calculate new streak values
+      const newPornStreak = porn ? 0 : (result.rows[0].porn_streak + 1);
+      const newWorkoutStreak = workout ? 0 : (result.rows[0].workout_streak + 1);
+
+      // Update the insert query to include all new columns
       const insertQuery = `
-        INSERT INTO stats (date, health, energy, mental, charisma, intellect, skill, journal_entry,embedding)
-        VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO stats (date, health, energy, mental, charisma, intellect, skill, water, smoke, porn_streak, workout_streak, journal_entry, embedding)
+        VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (date) 
         DO UPDATE SET 
           health = EXCLUDED.health,
@@ -176,26 +188,39 @@ app.post("/api/daily-entry", async (req, res) => {
           charisma = EXCLUDED.charisma,
           intellect = EXCLUDED.intellect,
           skill = EXCLUDED.skill,
+          water = EXCLUDED.water,
+          smoke = EXCLUDED.smoke,
+          porn_streak = EXCLUDED.porn_streak,
+          workout_streak = EXCLUDED.workout_streak,
           journal_entry = EXCLUDED.journal_entry,
           embedding = EXCLUDED.embedding
         RETURNING *;
       `;
      
       const values = [
-        updated_stats.health!=0?updated_stats.health:result.rows[0].health,
-        updated_stats.energy!=0?updated_stats.energy:result.rows[0].energy,
-        updated_stats.mental!=0?updated_stats.mental:result.rows[0].mental,
-        updated_stats.charisma!=0?updated_stats.charisma:result.rows[0].charisma,
-        updated_stats.intellect!=0?updated_stats.intellect:result.rows[0].intellect,
-        updated_stats.skill!=0?updated_stats.skill:result.rows[0].skill,
+        updated_stats.health != 0 ? updated_stats.health : result.rows[0].health,
+        updated_stats.energy != 0 ? updated_stats.energy : result.rows[0].energy,
+        updated_stats.mental != 0 ? updated_stats.mental : result.rows[0].mental,
+        updated_stats.charisma != 0 ? updated_stats.charisma : result.rows[0].charisma,
+        updated_stats.intellect != 0 ? updated_stats.intellect : result.rows[0].intellect,
+        updated_stats.skill != 0 ? updated_stats.skill : result.rows[0].skill,
+        water,
+        smoke,
+        newPornStreak,
+        newWorkoutStreak,
         entry,
         embedding
       ];
 
-      await client.query(insertQuery, values);
+      const dbResult = await client.query(insertQuery, values);
       
+      // Include all stats in the response
+      updated_stats.water = water;
+      updated_stats.smoke = smoke;
+      updated_stats.porn_streak = newPornStreak;
+      updated_stats.workout_streak = newWorkoutStreak;
 
-      res.status(200).json(updated_stats); // Return the updated stats to the frontend
+      res.status(200).json(updated_stats);
     } catch (error) {
       console.error("Error updating stats:", error);
       res.status(500).send("Server error");
@@ -207,14 +232,13 @@ app.post("/api/daily-entry", async (req, res) => {
 
 // Endpoint to get today's entry
 app.get("/api/stats", async (req, res) => {
- 
   try {
     const result = await client.query(
       "SELECT * FROM stats ORDER BY date DESC LIMIT 1;"
     );
     
     if (result.rows.length === 0) {
-      // If no entry exists for today, return default stats
+      // If no entry exists, return default stats
       res.status(200).json({
         health: 99,
         energy: 99,
@@ -222,23 +246,25 @@ app.get("/api/stats", async (req, res) => {
         charisma: 99,
         intellect: 99,
         skill: 99,
+        water: 0,
+        smoke: 0,
+        porn_streak: 0,
+        workout_streak: 0,
+        image: 1
       });
     } else {
-      var image=1 
-      var resultResponse 
+      var image = 1;
+      var resultResponse = result.rows[0];
       
-      if (result.rows[0].health > 80) {
-        image = 2
-        
+      if (resultResponse.health > 80) {
+        image = 2;
       }
-      if (result.rows[0].energy < 50) {
+      if (resultResponse.energy < 50) {
         image = 3;
-        
       }
-      resultResponse= result.rows[0]
-      resultResponse.image = image
+      resultResponse.image = image;
       
-      res.status(200).json(resultResponse); // Return today's stats from DB
+      res.status(200).json(resultResponse);
     }
   } catch (error) {
     console.error("Error fetching stats:", error);
