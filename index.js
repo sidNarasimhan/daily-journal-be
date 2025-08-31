@@ -8,8 +8,6 @@ import { z } from "zod";
 import { zodResponseFormat } from "openai/helpers/zod";
 import pkg from "pg";
 import cosineSimilarity from "cosine-similarity";
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 
 const { Client } = pkg;
 
@@ -27,12 +25,14 @@ const MathReasoning = z.object({
   skill: z.number(),
   message: z.string(),
 });
+
 const client = new Client({
-  user: "postgres",
-  host: "database-1.cz42g8gwq283.eu-north-1.rds.amazonaws.com",
-  database: "postgres",
-  password: "p6AStlYnGWsGJVAyAXZR",
-  port: 5432, // default PostgreSQL port
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT || 5432,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
 });
 
 client.connect();
@@ -68,19 +68,6 @@ function dateToWords(date) {
 
   return `${month} ${numberToWords(day)}`;
 }
-
-// Initialize the OAuth2 client
-const oauth2Client = new OAuth2Client(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
-
-// Define the scopes for Google Fit API
-const scopes = [
-  'https://www.googleapis.com/auth/fitness.activity.read',
-  'https://www.googleapis.com/auth/fitness.body.read'
-];
 
 app.post("/api/ask", async (req, res) => {
   const question = req.body.entry;
@@ -158,12 +145,6 @@ app.post("/api/daily-entry", async (req, res) => {
       "SELECT * FROM stats ORDER BY date DESC LIMIT 1;"
     );
 
-    // Fetch Google Fit data
-    const fitData = await getGoogleFitData();
-
-    // Calculate sleep score (0-100)
-    const sleepScore = Math.min(100, Math.round((fitData.sleep.totalSleep / 480) * 100)); // 480 minutes = 8 hours
-    
     // Send journal entry to ChatGPT with all health data
     const completion = await openai.chat.completions.create({
       model: "gpt-4-0125-preview",
@@ -173,20 +154,6 @@ app.post("/api/daily-entry", async (req, res) => {
           content: `You are my personal life coach who helps me become the best version of myself. You are harsh to me when i do things that are not progressing my life and celebrate the things that do. Analyze my daily journal entry along with my health metrics and habits to provide feedback and calculate updated stats.
 
           Previous stats for reference: ${JSON.stringify(result.rows[0])}
-
-          Current health metrics:
-          - Steps: ${fitData.steps}
-          - Calories Burned: ${Math.round(fitData.calories)}
-          - Active Minutes: ${fitData.activeMinutes}
-          - Heart Rate (avg/min/max): ${fitData.heartRate.avg}/${fitData.heartRate.min}/${fitData.heartRate.max} bpm
-          - Oxygen Levels (avg/min/max): ${fitData.oxygenSaturation.avg}/${fitData.oxygenSaturation.min}/${fitData.oxygenSaturation.max}%
-          - Sleep (minutes):
-            * Total: ${Math.round(fitData.sleep.totalSleep)}
-            * Deep: ${Math.round(fitData.sleep.deepSleep)}
-            * REM: ${Math.round(fitData.sleep.remSleep)}
-            * Light: ${Math.round(fitData.sleep.lightSleep)}
-            * Awake: ${Math.round(fitData.sleep.awake)}
-            * Sleep Score: ${sleepScore}/100
 
           Daily Habits:
           - Water Intake: ${water} cups
@@ -233,15 +200,10 @@ app.post("/api/daily-entry", async (req, res) => {
     const insertQuery = `
       INSERT INTO stats (
         date, health, energy, mental, charisma, intellect, skill, 
-        water, smoke, journal_entry, embedding, porn_streak, workout_streak,
-        steps, calories, active_minutes,
-        heart_rate_avg, heart_rate_min, heart_rate_max,
-        oxygen_avg, oxygen_min, oxygen_max,
-        sleep_deep, sleep_light, sleep_rem, sleep_awake, sleep_total
+        water, smoke, journal_entry, embedding, porn_streak, workout_streak
       )
       VALUES (
-        CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+        CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
       )
       ON CONFLICT (date) 
       DO UPDATE SET 
@@ -256,21 +218,7 @@ app.post("/api/daily-entry", async (req, res) => {
         journal_entry = EXCLUDED.journal_entry,
         embedding = EXCLUDED.embedding,
         porn_streak = EXCLUDED.porn_streak,
-        workout_streak = EXCLUDED.workout_streak,
-        steps = EXCLUDED.steps,
-        calories = EXCLUDED.calories,
-        active_minutes = EXCLUDED.active_minutes,
-        heart_rate_avg = EXCLUDED.heart_rate_avg,
-        heart_rate_min = EXCLUDED.heart_rate_min,
-        heart_rate_max = EXCLUDED.heart_rate_max,
-        oxygen_avg = EXCLUDED.oxygen_avg,
-        oxygen_min = EXCLUDED.oxygen_min,
-        oxygen_max = EXCLUDED.oxygen_max,
-        sleep_deep = EXCLUDED.sleep_deep,
-        sleep_light = EXCLUDED.sleep_light,
-        sleep_rem = EXCLUDED.sleep_rem,
-        sleep_awake = EXCLUDED.sleep_awake,
-        sleep_total = EXCLUDED.sleep_total
+        workout_streak = EXCLUDED.workout_streak
       RETURNING *;
     `;
 
@@ -286,21 +234,7 @@ app.post("/api/daily-entry", async (req, res) => {
       entry,
       embedding,
       porn_streak,
-      workout_streak,
-      fitData.steps,
-      fitData.calories,
-      fitData.activeMinutes,
-      fitData.heartRate.avg,
-      fitData.heartRate.min,
-      fitData.heartRate.max,
-      fitData.oxygenSaturation.avg,
-      fitData.oxygenSaturation.min,
-      fitData.oxygenSaturation.max,
-      Math.round(fitData.sleep.deepSleep),
-      Math.round(fitData.sleep.lightSleep),
-      Math.round(fitData.sleep.remSleep),
-      Math.round(fitData.sleep.awake),
-      Math.round(fitData.sleep.totalSleep)
+      workout_streak
     ];
 
     const dbResult = await client.query(insertQuery, values);
@@ -310,13 +244,6 @@ app.post("/api/daily-entry", async (req, res) => {
     updated_stats.smoke = smoke;
     updated_stats.porn_streak = porn_streak;
     updated_stats.workout_streak = workout_streak;
-    updated_stats.steps = fitData.steps;
-    updated_stats.calories = fitData.calories;
-    updated_stats.active_minutes = fitData.activeMinutes;
-    updated_stats.heart_rate = fitData.heartRate;
-    updated_stats.oxygen = fitData.oxygenSaturation;
-    updated_stats.sleep = fitData.sleep;
-    updated_stats.sleep_score = sleepScore;
 
     res.status(200).json(updated_stats);
   } catch (error) {
@@ -346,20 +273,6 @@ app.get("/api/stats", async (req, res) => {
         smoke: 0,
         porn_streak: 0,
         workout_streak: 0,
-        steps: 0,
-        calories: 0,
-        active_minutes: 0,
-        heart_rate_avg: 0,
-        heart_rate_min: 0,
-        heart_rate_max: 0,
-        oxygen_avg: 0,
-        oxygen_min: 0,
-        oxygen_max: 0,
-        sleep_deep: 0,
-        sleep_light: 0,
-        sleep_rem: 0,
-        sleep_awake: 0,
-        sleep_total: 0,
         image: 1
       });
       return;
@@ -398,193 +311,8 @@ app.get("/api/stats", async (req, res) => {
   }
 });
 
-app.get('/auth/google-fit', (req, res) => {
-  const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: scopes,
-  });
-  res.redirect(authUrl);
-});
-
-app.get('/auth/google-fit/callback', async (req, res) => {
-  const { code } = req.query;
-  try {
-    const { tokens } = await oauth2Client.getToken(code);
-    // Store the refresh token in your stats table
-    await client.query(`
-      INSERT INTO stats (date, google_fit_refresh_token)
-      VALUES (CURRENT_DATE, $1)
-      ON CONFLICT (date) 
-      DO UPDATE SET google_fit_refresh_token = EXCLUDED.google_fit_refresh_token
-    `, [tokens.refresh_token]);
-    res.send('Google Fit authorization successful');
-  } catch (error) {
-    console.error('Error during Google Fit authorization:', error);
-    res.status(500).send('Authorization failed');
-  }
-});
-
 // Start the server
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
-
-async function getGoogleFitData() {
-  try {
-    const result = await client.query('SELECT google_fit_refresh_token FROM stats WHERE google_fit_refresh_token IS NOT NULL ORDER BY date DESC LIMIT 1');
-    const refreshToken = result.rows[0]?.google_fit_refresh_token;
-
-    if (!refreshToken) {
-      return { 
-        steps: 0, 
-        calories: 0, 
-        activeMinutes: 0,
-        heartRate: { avg: 0, min: 0, max: 0 },
-        oxygenSaturation: { avg: 0, min: 0, max: 0 },
-        sleep: {
-          deepSleep: 0,
-          lightSleep: 0,
-          remSleep: 0,
-          awake: 0,
-          totalSleep: 0
-        }
-      };
-    }
-
-    oauth2Client.setCredentials({ refresh_token: refreshToken });
-    const fitness = google.fitness({ version: 'v1', auth: oauth2Client });
-
-    const now = Date.now();
-    const midnight = new Date(now).setHours(0, 0, 0, 0);
-
-    // Request all data types
-    const responses = await Promise.allSettled([
-      // Basic activity data
-      fitness.users.dataset.aggregate({
-        userId: 'me',
-        requestBody: {
-          aggregateBy: [
-            { dataTypeName: 'com.google.step_count.delta' },
-            { dataTypeName: 'com.google.calories.expended' },
-            { dataTypeName: 'com.google.activity.segment' }
-          ],
-          bucketByTime: { durationMillis: 86400000 },
-          startTimeMillis: midnight,
-          endTimeMillis: now
-        }
-      }),
-      // Heart rate data
-      fitness.users.dataset.aggregate({
-        userId: 'me',
-        requestBody: {
-          aggregateBy: [{ dataTypeName: 'com.google.heart_rate.bpm' }],
-          bucketByTime: { durationMillis: 86400000 },
-          startTimeMillis: midnight,
-          endTimeMillis: now
-        }
-      }),
-      // Oxygen saturation data
-      fitness.users.dataset.aggregate({
-        userId: 'me',
-        requestBody: {
-          aggregateBy: [{ dataTypeName: 'com.google.oxygen_saturation' }],
-          bucketByTime: { durationMillis: 86400000 },
-          startTimeMillis: midnight,
-          endTimeMillis: now
-        }
-      }),
-      // Sleep data
-      fitness.users.dataset.aggregate({
-        userId: 'me',
-        requestBody: {
-          aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
-          bucketByTime: { durationMillis: 86400000 },
-          startTimeMillis: midnight,
-          endTimeMillis: now
-        }
-      })
-    ]);
-
-    // Process heart rate data
-    const heartRateData = responses[1].status === 'fulfilled' ? 
-      responses[1].value.data.bucket[0]?.dataset[0]?.point || [] : [];
-    const heartRates = heartRateData.map(point => point.value[0].fpVal).filter(Boolean);
-    const heartRate = heartRates.length ? {
-      avg: Math.round(heartRates.reduce((a, b) => a + b, 0) / heartRates.length),
-      min: Math.round(Math.min(...heartRates)),
-      max: Math.round(Math.max(...heartRates))
-    } : { avg: 0, min: 0, max: 0 };
-
-    // Process oxygen data
-    const oxygenData = responses[2].status === 'fulfilled' ? 
-      responses[2].value.data.bucket[0]?.dataset[0]?.point || [] : [];
-    const oxygenLevels = oxygenData.map(point => point.value[0].fpVal).filter(Boolean);
-    const oxygenSaturation = oxygenLevels.length ? {
-      avg: Math.round(oxygenLevels.reduce((a, b) => a + b, 0) / oxygenLevels.length),
-      min: Math.round(Math.min(...oxygenLevels)),
-      max: Math.round(Math.max(...oxygenLevels))
-    } : { avg: 0, min: 0, max: 0 };
-
-    // Process sleep data
-    const sleepData = responses[3].status === 'fulfilled' ? 
-      responses[3].value.data.bucket[0]?.dataset[0]?.point || [] : [];
-    
-    const sleep = {
-      deepSleep: 0,
-      lightSleep: 0,
-      remSleep: 0,
-      awake: 0,
-      totalSleep: 0
-    };
-
-    sleepData.forEach(point => {
-      const duration = (point.endTimeMillis - point.startTimeMillis) / (1000 * 60); // Convert to minutes
-      switch(point.value[0].intVal) {
-        case 1: // Deep sleep
-          sleep.deepSleep += duration;
-          sleep.totalSleep += duration;
-          break;
-        case 2: // Light sleep
-          sleep.lightSleep += duration;
-          sleep.totalSleep += duration;
-          break;
-        case 3: // REM
-          sleep.remSleep += duration;
-          sleep.totalSleep += duration;
-          break;
-        case 4: // Awake
-          sleep.awake += duration;
-          break;
-      }
-    });
-
-    return {
-      steps: responses[0].status === 'fulfilled' ? 
-        (responses[0].value.data.bucket[0]?.dataset[0]?.point[0]?.value[0]?.intVal || 0) : 0,
-      calories: responses[0].status === 'fulfilled' ? 
-        (responses[0].value.data.bucket[0]?.dataset[1]?.point[0]?.value[0]?.fpVal || 0) : 0,
-      activeMinutes: responses[0].status === 'fulfilled' ? 
-        (responses[0].value.data.bucket[0]?.dataset[2]?.point[0]?.value[0]?.intVal || 0) : 0,
-      heartRate,
-      oxygenSaturation,
-      sleep
-    };
-  } catch (error) {
-    console.error('Error fetching Google Fit data:', error);
-    return {
-      steps: 0,
-      calories: 0,
-      activeMinutes: 0,
-      heartRate: { avg: 0, min: 0, max: 0 },
-      oxygenSaturation: { avg: 0, min: 0, max: 0 },
-      sleep: {
-        deepSleep: 0,
-        lightSleep: 0,
-        remSleep: 0,
-        awake: 0,
-        totalSleep: 0
-      }
-    };
-  }
-}
 
