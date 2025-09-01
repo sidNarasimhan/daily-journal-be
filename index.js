@@ -1,29 +1,16 @@
-// server.js
+// Life Progress Tracker Backend
 import dotenv from 'dotenv';
 dotenv.config();
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
 import { z } from "zod";
-import { zodResponseFormat } from "openai/helpers/zod";
 import pkg from "pg";
-import cosineSimilarity from "cosine-similarity";
 
 const { Client } = pkg;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-});
-
-
-const MathReasoning = z.object({
-  health: z.number(),
-  energy: z.number(),
-  mental: z.number(),
-  charisma: z.number(),
-  intellect: z.number(),
-  skill: z.number(),
-  message: z.string(),
 });
 
 const client = new Client({
@@ -39,280 +26,789 @@ client.connect();
 
 const app = express();
 const port = 5000;
-app.use(cors({
-  origin: '*', // Allow all origins
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow specific methods
-  allowedHeaders: ['Content-Type', 'Authorization'], // Allow specific headers
-}));
 
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-function numberToWords(number) {
-  const words = [
-    "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
-    "twenty", "twenty one", "twenty two", "twenty three", "twenty four", "twenty five", "twenty six", 
-    "twenty seven", "twenty eight", "twenty nine", "thirty", "thirty one"
-  ];
-
-  return words[number];
-}
-
-// Function to convert Date object to 'Month Day in words' format
-function dateToWords(date) {
-  const options = { month: 'long' }; // Get full month name
-  const month = date.toLocaleString('en-US', options); // 'September'
-  const day = date.getDate(); // Get the day number
-
-  return `${month} ${numberToWords(day)}`;
-}
-
-app.post("/api/ask", async (req, res) => {
-  const question = req.body.entry;
-  
+// Helper function to generate embeddings
+async function generateEmbedding(text) {
   try {
-    // Step 1: Generate an embedding for the question
-    const questionEmbedding = await openai.embeddings.create({
+    const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-ada-002",
-      input: question
+      input: text
     });
+    return `[${embeddingResponse.data[0].embedding.join(',')}]`;
+  } catch (error) {
+    console.error("Error generating embedding:", error);
+    return null;
+  }
+}
 
-    const questionVector = questionEmbedding.data[0].embedding;
-
-    // Step 2: Use a database function to calculate similarity and fetch top entries
-    const fetchQuery = `
-      WITH similarity_scores AS (
-        SELECT 
-          journal_entry, 
-          date, 
-          water, 
-          smoke, 
-          porn_streak, 
-          workout_streak,
-          embedding <=> $1::vector AS similarity
-        FROM stats
-        WHERE embedding IS NOT NULL
-      )
-      SELECT *
-      FROM similarity_scores
-      ORDER BY similarity ASC
-      LIMIT 10;
-    `;
+// Helper function to get AI context
+async function getAIContext(sessionId = null) {
+  try {
+    // Get recent journal entries
+    const entriesResult = await client.query(
+      "SELECT * FROM daily_entries ORDER BY date DESC LIMIT 7"
+    );
     
-    // Convert the questionVector array to a properly formatted PostgreSQL vector string
-    const formattedVector = `[${questionVector.join(',')}]`;
+    // Get active goals
+    const goalsResult = await client.query(
+      "SELECT g.*, la.name as life_area_name FROM goals g JOIN life_areas la ON g.life_area_id = la.id WHERE g.status = 'active'"
+    );
     
-    const result = await client.query(fetchQuery, [formattedVector]);
-    const topEntries = result.rows;
+    // Get active habits
+    const habitsResult = await client.query(
+      "SELECT h.*, la.name as life_area_name FROM habits h JOIN life_areas la ON h.life_area_id = la.id WHERE h.status = 'active'"
+    );
+    
+    // Get recent conversations if sessionId provided
+    let conversations = [];
+    if (sessionId) {
+      const convResult = await client.query(
+        "SELECT * FROM conversations WHERE session_id = $1 ORDER BY created_at DESC LIMIT 10",
+        [sessionId]
+      );
+      conversations = convResult.rows;
+    }
+    
+    return {
+      recentEntries: entriesResult.rows,
+      activeGoals: goalsResult.rows,
+      activeHabits: habitsResult.rows,
+      recentConversations: conversations
+    };
+  } catch (error) {
+    console.error("Error getting AI context:", error);
+    return { recentEntries: [], activeGoals: [], activeHabits: [], recentConversations: [] };
+  }
+}
 
-    // Step 3: Prepare the context with the most relevant entries
-    const context = topEntries.map(entry => 
-      `Date: ${entry.date}, Entry: ${entry.journal_entry}, Water: ${entry.water}, Smoke: ${entry.smoke}, Porn Streak: ${entry.porn_streak}, Workout Streak: ${entry.workout_streak}`
-    ).join("\n");
+// Helper function to update goal progress
+async function updateGoalProgress(goalId, progressChange, reason, source = 'journal') {
+  try {
+    // Get current goal
+    const goalResult = await client.query(
+      "SELECT current_progress FROM goals WHERE id = $1",
+      [goalId]
+    );
+    
+    if (goalResult.rows.length === 0) return;
+    
+    const currentProgress = goalResult.rows[0].current_progress;
+    const newProgress = Math.min(100, Math.max(0, currentProgress + progressChange));
+    
+    // Update goal progress
+    await client.query(
+      "UPDATE goals SET current_progress = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [newProgress, goalId]
+    );
+    
+    // Log progress update
+    await client.query(
+      "INSERT INTO goal_progress_logs (goal_id, progress_percentage, update_reason, source) VALUES ($1, $2, $3, $4)",
+      [goalId, newProgress, reason, source]
+    );
+    
+    return newProgress;
+  } catch (error) {
+    console.error("Error updating goal progress:", error);
+  }
+}
 
-    // Step 4: Prepare the prompt with the context and the user's question
-    const prompt = `Context: ${context}\n\nQuestion: ${question}\nAnswer:`;
+// Helper function to update habit streak
+async function updateHabitStreak(habitId, success, notes = '') {
+  try {
+    // Get current habit
+    const habitResult = await client.query(
+      "SELECT current_streak, longest_streak FROM habits WHERE id = $1",
+      [habitId]
+    );
+    
+    if (habitResult.rows.length === 0) return;
+    
+    const { current_streak, longest_streak } = habitResult.rows[0];
+    let newStreak = success ? current_streak + 1 : 0;
+    let newLongestStreak = Math.max(longest_streak, newStreak);
+    
+    // Update habit streak
+    await client.query(
+      "UPDATE habits SET current_streak = $1, longest_streak = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
+      [newStreak, newLongestStreak, habitId]
+    );
+    
+    // Log habit completion
+    await client.query(
+      "INSERT INTO habit_logs (habit_id, success, notes) VALUES ($1, $2, $3)",
+      [habitId, success, notes]
+    );
+    
+    return { newStreak, newLongestStreak };
+  } catch (error) {
+    console.error("Error updating habit streak:", error);
+  }
+}
 
-    // Step 5: Call the OpenAI API to generate an answer based on the relevant entries
+// Helper function to update goal metrics
+async function updateGoalMetrics(goalId, metricName, newValue, unit = '') {
+  try {
+    // Check if metric exists
+    const metricResult = await client.query(
+      "SELECT * FROM goal_metrics WHERE goal_id = $1 AND metric_name = $2",
+      [goalId, metricName]
+    );
+    
+    if (metricResult.rows.length > 0) {
+      // Update existing metric
+      await client.query(
+        "UPDATE goal_metrics SET current_value = $1, updated_at = CURRENT_TIMESTAMP WHERE goal_id = $2 AND metric_name = $3",
+        [newValue, goalId, metricName]
+      );
+    } else {
+      // Create new metric
+      await client.query(
+        "INSERT INTO goal_metrics (goal_id, metric_name, current_value, unit) VALUES ($1, $2, $3, $4)",
+        [goalId, metricName, newValue, unit]
+      );
+    }
+    
+    return newValue;
+  } catch (error) {
+    console.error("Error updating goal metrics:", error);
+  }
+}
+
+// 1. Daily Entry Endpoint (Enhanced)
+app.post("/api/daily-entry", async (req, res) => {
+  const { entry } = req.body;
+  
+  if (!entry) {
+    return res.status(400).json({ error: "Journal entry is required" });
+  }
+
+  try {
+    // Generate embedding for the entry
+    const embedding = await generateEmbedding(entry);
+    
+    // Get AI context
+    const context = await getAIContext();
+    
+    // Enhanced AI analysis
+    const analysisPrompt = `
+You are analyzing a daily journal entry to extract insights and track progress across goals, habits, and life improvements.
+
+Recent Journal Entries:
+${context.recentEntries.map(e => `Date: ${e.date}, Entry: ${e.journal_entry}`).join('\n')}
+
+Active Goals:
+${context.activeGoals.map(g => `- ${g.title} (${g.current_progress}% complete): ${g.description}`).join('\n')}
+
+Active Habits:
+${context.activeHabits.map(h => `- ${h.title} (${h.current_streak} day streak): ${h.description}`).join('\n')}
+
+Current Journal Entry: ${entry}
+
+Please analyze this entry and provide:
+1. Mood level (1-10, where 1=terrible, 10=excellent)
+2. Energy level (1-10, where 1=exhausted, 10=very energetic)
+3. Water intake mentioned (number of liters, 0 if not mentioned)
+4. Smoking mentioned (number of cigarettes, 0 if not mentioned)
+5. Brief analysis of the day (2-3 sentences)
+6. Goal-related activities detected (list goal titles that were worked on)
+7. Habit completions detected (list habit titles that were completed)
+8. Habit failures detected (list habit titles that were failed)
+9. Any specific metrics mentioned (weight, savings, etc. with values)
+
+Respond in JSON format:
+{
+  "mood": number,
+  "energy": number,
+  "water": number,
+  "smoke": number,
+  "analysis": "your analysis here",
+  "goal_activities": ["goal1", "goal2"],
+  "habit_completions": ["habit1", "habit2"],
+  "habit_failures": ["habit1"],
+  "metrics": [
+    {"name": "weight", "value": 95.5, "unit": "kg"},
+    {"name": "savings", "value": 15.2, "unit": "lakhs"}
+  ]
+}
+`;
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-2024-08-06",
-      messages: [
-        {
-          role: "system",
-          content: `You are my personal life coach who helps me become the best version of myself. You have access to my daily journals and other details through the context i provide. The prompt i send you will be in the form of "Context" then "Question". Each answer is to be concise and not more than 2 or 3 lines. Convert any dates in the question into word format like "October four", this has to be only for the question, not the answer you send as a response. Some questions will be vague, in these cases try your best to use the information available from the context as best as possible`,
-        },
-        { role: "user", content: prompt }
-      ]
-    });
-
-    // Step 6: Send the response back to the frontend
-    res.json({ answer: completion.choices[0].message.content });
-  } catch (error) {
-    console.error("Error while processing question:", error);
-    res.status(500).json({ error: "Internal server error" });
-  } 
-});
-
-
-app.post("/api/daily-entry", async (req, res) => {
-  const { entry, water, smoke, porn_streak, workout_streak } = req.body;
-
-  try {
-    // Fetch the most recent stats
-    const result = await client.query(
-      "SELECT * FROM stats ORDER BY date DESC LIMIT 1;"
-    );
-
-    // Send journal entry to ChatGPT with all health data
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4-0125-preview",
-      messages: [
-        {
-          role: "system",
-          content: `You are my personal life coach who helps me become the best version of myself. You are harsh to me when i do things that are not progressing my life and celebrate the things that do. Analyze my daily journal entry along with my health metrics and habits to provide feedback and calculate updated stats.
-
-          Previous stats for reference: ${JSON.stringify(result.rows[0])}
-
-          Daily Habits:
-          - Water Intake: ${water} cups
-          - Cigarettes: ${smoke}
-          - Porn Free: ${porn_streak != 0 ? "Yes" : "No"}
-          - Worked Out: ${workout_streak != 0 ? "Yes" : "No"}
-
-          Based on all this information and the journal entry, provide:
-          1. A brief, direct analysis of my day
-          2. Updated stats (0-100) for: health, energy, mental, charisma, intellect, skill
-          
-          Respond in JSON format with:
-          {
-            "message": "your analysis here",
-            "health": number,
-            "energy": number,
-            "mental": number,
-            "charisma": number,
-            "intellect": number,
-            "skill": number
-          }`,
-        },
-        {
-          role: "user",
-          content: entry
-        }
-      ],
+      messages: [{ role: "user", content: analysisPrompt }],
       response_format: { type: "json_object" }
     });
 
-    const updated_stats = JSON.parse(completion.choices[0].message.content);
-    updated_stats.image = 1;
-    if (updated_stats.health > 80) updated_stats.image = 2;
-    if (updated_stats.energy < 50) updated_stats.image = 3;
-
-    // Generate embedding for the entry
-    const embeddingResponse = await openai.embeddings.create({
-      model: "text-embedding-ada-002",
-      input: `Date:${dateToWords(new Date())} ${entry}`
-    });
-    const embedding = `[${embeddingResponse.data[0].embedding.join(',')}]`;
-
-    // Update database with all data
+    const analysis = JSON.parse(completion.choices[0].message.content);
+    
+    // Prepare habit completions and goal mentions for storage
+    const habitCompletions = {};
+    const goalMentions = {};
+    
+    // Update habit completions
+    if (analysis.habit_completions && analysis.habit_completions.length > 0) {
+      for (const habitTitle of analysis.habit_completions) {
+        const habitResult = await client.query(
+          "SELECT id FROM habits WHERE title ILIKE $1 AND status = 'active'",
+          [`%${habitTitle}%`]
+        );
+        
+        if (habitResult.rows.length > 0) {
+          const habitId = habitResult.rows[0].id;
+          await updateHabitStreak(habitId, true, `Completed based on journal entry`);
+          habitCompletions[habitId] = { success: true, notes: 'Completed' };
+        }
+      }
+    }
+    
+    // Update habit failures
+    if (analysis.habit_failures && analysis.habit_failures.length > 0) {
+      for (const habitTitle of analysis.habit_failures) {
+        const habitResult = await client.query(
+          "SELECT id FROM habits WHERE title ILIKE $1 AND status = 'active'",
+          [`%${habitTitle}%`]
+        );
+        
+        if (habitResult.rows.length > 0) {
+          const habitId = habitResult.rows[0].id;
+          await updateHabitStreak(habitId, false, `Failed based on journal entry`);
+          habitCompletions[habitId] = { success: false, notes: 'Failed' };
+        }
+      }
+    }
+    
+    // Update goal progress
+    if (analysis.goal_activities && analysis.goal_activities.length > 0) {
+      for (const goalTitle of analysis.goal_activities) {
+        const goalResult = await client.query(
+          "SELECT id FROM goals WHERE title ILIKE $1 AND status = 'active'",
+          [`%${goalTitle}%`]
+        );
+        
+        if (goalResult.rows.length > 0) {
+          const goalId = goalResult.rows[0].id;
+          await updateGoalProgress(goalId, 5, `Worked on goal mentioned in journal entry`);
+          goalMentions[goalId] = { progress: 5, reason: 'Worked on goal' };
+        }
+      }
+    }
+    
+    // Update goal metrics
+    if (analysis.metrics && analysis.metrics.length > 0) {
+      for (const metric of analysis.metrics) {
+        // Find relevant goal for this metric
+        const goalResult = await client.query(
+          "SELECT id FROM goals WHERE title ILIKE $1 AND status = 'active'",
+          [`%${metric.name}%`]
+        );
+        
+        if (goalResult.rows.length > 0) {
+          await updateGoalMetrics(goalResult.rows[0].id, metric.name, metric.value, metric.unit);
+        }
+      }
+    }
+    
+    // Store the entry
     const insertQuery = `
-      INSERT INTO stats (
-        date, health, energy, mental, charisma, intellect, skill, 
-        water, smoke, journal_entry, embedding, porn_streak, workout_streak
+      INSERT INTO daily_entries (
+        date, journal_entry, embedding, ai_extracted_mood, ai_extracted_energy, 
+        ai_extracted_water, ai_extracted_smoke, ai_analysis, habit_completions, goal_mentions
       )
-      VALUES (
-        CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-      )
+      VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (date) 
       DO UPDATE SET 
-        health = EXCLUDED.health,
-        energy = EXCLUDED.energy,
-        mental = EXCLUDED.mental,
-        charisma = EXCLUDED.charisma,
-        intellect = EXCLUDED.intellect,
-        skill = EXCLUDED.skill,
-        water = EXCLUDED.water,
-        smoke = EXCLUDED.smoke,
         journal_entry = EXCLUDED.journal_entry,
         embedding = EXCLUDED.embedding,
-        porn_streak = EXCLUDED.porn_streak,
-        workout_streak = EXCLUDED.workout_streak
+        ai_extracted_mood = EXCLUDED.ai_extracted_mood,
+        ai_extracted_energy = EXCLUDED.ai_extracted_energy,
+        ai_extracted_water = EXCLUDED.ai_extracted_water,
+        ai_extracted_smoke = EXCLUDED.ai_extracted_smoke,
+        ai_analysis = EXCLUDED.ai_analysis,
+        habit_completions = EXCLUDED.habit_completions,
+        goal_mentions = EXCLUDED.goal_mentions,
+        updated_at = CURRENT_TIMESTAMP
       RETURNING *;
     `;
 
     const values = [
-      updated_stats.health != 0 ? updated_stats.health : result.rows[0].health,
-      updated_stats.energy != 0 ? updated_stats.energy : result.rows[0].energy,
-      updated_stats.mental != 0 ? updated_stats.mental : result.rows[0].mental,
-      updated_stats.charisma != 0 ? updated_stats.charisma : result.rows[0].charisma,
-      updated_stats.intellect != 0 ? updated_stats.intellect : result.rows[0].intellect,
-      updated_stats.skill != 0 ? updated_stats.skill : result.rows[0].skill,
-      water,
-      smoke,
       entry,
       embedding,
-      porn_streak,
-      workout_streak
+      analysis.mood,
+      analysis.energy,
+      analysis.water,
+      analysis.smoke,
+      analysis.analysis,
+      JSON.stringify(habitCompletions),
+      JSON.stringify(goalMentions)
     ];
 
     const dbResult = await client.query(insertQuery, values);
-    
-    // Include all stats in the response
-    updated_stats.water = water;
-    updated_stats.smoke = smoke;
-    updated_stats.porn_streak = porn_streak;
-    updated_stats.workout_streak = workout_streak;
 
-    res.status(200).json(updated_stats);
+    res.status(200).json({
+      success: true,
+      entry: dbResult.rows[0],
+      analysis: analysis
+    });
   } catch (error) {
-    console.error("Error updating stats:", error);
-    res.status(500).send("Server error");
+    console.error("Error processing daily entry:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Endpoint to get today's entry
+// 2. Chat with AI Endpoint (Enhanced)
+app.post("/api/chat", async (req, res) => {
+  const { message, sessionId } = req.body;
+  
+  if (!message) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+
+  try {
+    // Generate embeddings
+    const userMessageEmbedding = await generateEmbedding(message);
+    const fullConversationEmbedding = await generateEmbedding(message);
+    
+    // Get AI context
+    const context = await getAIContext(sessionId);
+    
+    // Build conversation history
+    const conversationHistory = context.recentConversations
+      .map(conv => `User: ${conv.user_message}\nAI: ${conv.ai_response}`)
+      .join('\n\n');
+    
+    // Enhanced AI prompt
+    const chatPrompt = `
+You are a personal life coach and progress tracker. You help the user stay on track with their goals, habits, and life improvements.
+
+User's Active Goals:
+${context.activeGoals.map(g => `- ${g.title} (${g.current_progress}% complete): ${g.description}`).join('\n')}
+
+User's Active Habits:
+${context.activeHabits.map(h => `- ${h.title} (${h.current_streak} day streak): ${h.description}`).join('\n')}
+
+Recent Journal Entries (last 7 days):
+${context.recentEntries.map(e => `Date: ${e.date}, Mood: ${e.ai_extracted_mood}/10, Energy: ${e.ai_extracted_energy}/10, Entry: ${e.journal_entry}`).join('\n')}
+
+Recent Conversation History:
+${conversationHistory}
+
+Current User Message: ${message}
+
+Respond as a supportive life coach who:
+1. Understands the user's goals, habits, and current progress
+2. Provides specific, actionable advice
+3. Acknowledges their recent activities and patterns
+4. Helps them stay motivated and on track
+5. Can help update progress if they mention working on goals/habits
+6. Celebrates successes and provides gentle encouragement for setbacks
+
+Keep your response conversational and supportive, not more than 3-4 sentences.
+`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-2024-08-06",
+      messages: [{ role: "user", content: chatPrompt }]
+    });
+
+    const aiResponse = completion.choices[0].message.content;
+    
+    // Store the conversation
+    const sessionIdToUse = sessionId || `session_${Date.now()}`;
+    await client.query(
+      "INSERT INTO conversations (session_id, user_message, ai_response, user_message_embedding, full_conversation_embedding) VALUES ($1, $2, $3, $4, $5)",
+      [sessionIdToUse, message, aiResponse, userMessageEmbedding, fullConversationEmbedding]
+    );
+    
+    // Check for goal/habit progress mentions and update accordingly
+    const progressPrompt = `
+Based on this user message: "${message}"
+
+And these active goals:
+${context.activeGoals.map(g => `- ${g.title} (${g.current_progress}% complete)`).join('\n')}
+
+And these active habits:
+${context.activeHabits.map(h => `- ${h.title} (${h.current_streak} day streak)`).join('\n')}
+
+Does the user mention:
+1. Working on or making progress on any goals? If yes, list goal titles.
+2. Completing or failing any habits? If yes, list habit titles with success/failure.
+3. Any specific metrics (weight, savings, etc.)? If yes, list with values.
+
+Respond in JSON format:
+{
+  "goal_progress": ["goal1", "goal2"],
+  "habit_completions": ["habit1", "habit2"],
+  "habit_failures": ["habit1"],
+  "metrics": [{"name": "weight", "value": 95.5, "unit": "kg"}]
+}
+`;
+
+    const progressCompletion = await openai.chat.completions.create({
+      model: "gpt-4o-2024-08-06",
+      messages: [{ role: "user", content: progressPrompt }],
+      response_format: { type: "json_object" }
+    });
+
+    const progressUpdate = JSON.parse(progressCompletion.choices[0].message.content);
+    
+    // Update goal progress
+    if (progressUpdate.goal_progress && progressUpdate.goal_progress.length > 0) {
+      for (const goalTitle of progressUpdate.goal_progress) {
+        const goalResult = await client.query(
+          "SELECT id FROM goals WHERE title ILIKE $1 AND status = 'active'",
+          [`%${goalTitle}%`]
+        );
+        
+        if (goalResult.rows.length > 0) {
+          await updateGoalProgress(goalResult.rows[0].id, 3, `Mentioned progress in conversation`, 'conversation');
+        }
+      }
+    }
+    
+    // Update habit completions
+    if (progressUpdate.habit_completions && progressUpdate.habit_completions.length > 0) {
+      for (const habitTitle of progressUpdate.habit_completions) {
+        const habitResult = await client.query(
+          "SELECT id FROM habits WHERE title ILIKE $1 AND status = 'active'",
+          [`%${habitTitle}%`]
+        );
+        
+        if (habitResult.rows.length > 0) {
+          await updateHabitStreak(habitResult.rows[0].id, true, `Completed based on conversation`);
+        }
+      }
+    }
+    
+    // Update habit failures
+    if (progressUpdate.habit_failures && progressUpdate.habit_failures.length > 0) {
+      for (const habitTitle of progressUpdate.habit_failures) {
+        const habitResult = await client.query(
+          "SELECT id FROM habits WHERE title ILIKE $1 AND status = 'active'",
+          [`%${habitTitle}%`]
+        );
+        
+        if (habitResult.rows.length > 0) {
+          await updateHabitStreak(habitResult.rows[0].id, false, `Failed based on conversation`);
+        }
+      }
+    }
+    
+    // Update metrics
+    if (progressUpdate.metrics && progressUpdate.metrics.length > 0) {
+      for (const metric of progressUpdate.metrics) {
+        const goalResult = await client.query(
+          "SELECT id FROM goals WHERE title ILIKE $1 AND status = 'active'",
+          [`%${metric.name}%`]
+        );
+        
+        if (goalResult.rows.length > 0) {
+          await updateGoalMetrics(goalResult.rows[0].id, metric.name, metric.value, metric.unit);
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      response: aiResponse,
+      sessionId: sessionIdToUse
+    });
+  } catch (error) {
+    console.error("Error in chat:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 3. Goal Management Endpoints
+app.post("/api/goals", async (req, res) => {
+  const { title, description, life_area_id, target_date, goal_type } = req.body;
+  
+  if (!title || !life_area_id) {
+    return res.status(400).json({ error: "Title and life area are required" });
+  }
+
+  try {
+    const goalEmbedding = await generateEmbedding(`${title} ${description || ''}`);
+    
+    const result = await client.query(
+      "INSERT INTO goals (title, description, goal_embedding, life_area_id, target_date, goal_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      [title, description, goalEmbedding, life_area_id, target_date, goal_type || 'achievement']
+    );
+    
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating goal:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/goals", async (req, res) => {
+  try {
+    const result = await client.query(
+      "SELECT g.*, la.name as life_area_name, la.color FROM goals g JOIN life_areas la ON g.life_area_id = la.id ORDER BY g.created_at DESC"
+    );
+    
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching goals:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/goals/:id", async (req, res) => {
+  const { id } = req.params;
+  const { title, description, life_area_id, status, current_progress, target_date, goal_type } = req.body;
+  
+  try {
+    let goalEmbedding = null;
+    if (title || description) {
+      goalEmbedding = await generateEmbedding(`${title || ''} ${description || ''}`);
+    }
+    
+    const updateFields = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title) {
+      updateFields.push(`title = $${paramCount++}`);
+      values.push(title);
+    }
+    if (description) {
+      updateFields.push(`description = $${paramCount++}`);
+      values.push(description);
+    }
+    if (life_area_id) {
+      updateFields.push(`life_area_id = $${paramCount++}`);
+      values.push(life_area_id);
+    }
+    if (status) {
+      updateFields.push(`status = $${paramCount++}`);
+      values.push(status);
+    }
+    if (current_progress !== undefined) {
+      updateFields.push(`current_progress = $${paramCount++}`);
+      values.push(current_progress);
+    }
+    if (target_date) {
+      updateFields.push(`target_date = $${paramCount++}`);
+      values.push(target_date);
+    }
+    if (goal_type) {
+      updateFields.push(`goal_type = $${paramCount++}`);
+      values.push(goal_type);
+    }
+    if (goalEmbedding) {
+      updateFields.push(`goal_embedding = $${paramCount++}`);
+      values.push(goalEmbedding);
+    }
+    
+    updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(id);
+    
+    const result = await client.query(
+      `UPDATE goals SET ${updateFields.join(', ')} WHERE id = $${paramCount} RETURNING *`,
+      values
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Goal not found" });
+    }
+    
+    res.status(200).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating goal:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/api/goals/:id", async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const result = await client.query("DELETE FROM goals WHERE id = $1 RETURNING *", [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Goal not found" });
+    }
+    
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Error deleting goal:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 4. Habit Management Endpoints
+app.post("/api/habits", async (req, res) => {
+  const { title, description, life_area_id, frequency, target_count, habit_type } = req.body;
+  
+  if (!title || !life_area_id || !frequency) {
+    return res.status(400).json({ error: "Title, life area, and frequency are required" });
+  }
+
+  try {
+    const habitEmbedding = await generateEmbedding(`${title} ${description || ''}`);
+    
+    const result = await client.query(
+      "INSERT INTO habits (title, description, habit_embedding, life_area_id, frequency, target_count, habit_type) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+      [title, description, habitEmbedding, life_area_id, frequency, target_count || 1, habit_type || 'formation']
+    );
+    
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating habit:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/habits", async (req, res) => {
+  try {
+    const result = await client.query(
+      "SELECT h.*, la.name as life_area_name, la.color FROM habits h JOIN life_areas la ON h.life_area_id = la.id ORDER BY h.created_at DESC"
+    );
+    
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching habits:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/habits/:id/complete", async (req, res) => {
+  const { id } = req.params;
+  const { success, notes } = req.body;
+  
+  try {
+    const result = await updateHabitStreak(id, success !== false, notes);
+    
+    if (!result) {
+      return res.status(404).json({ error: "Habit not found" });
+    }
+    
+    res.status(200).json({ success: true, streak: result });
+  } catch (error) {
+    console.error("Error completing habit:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 5. Life Areas Endpoint
+app.get("/api/life-areas", async (req, res) => {
+  try {
+    const result = await client.query("SELECT * FROM life_areas ORDER BY name");
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching life areas:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 6. Stats Endpoint (Enhanced)
 app.get("/api/stats", async (req, res) => {
   try {
-    // Get the latest entry first
-    const latestResult = await client.query(
-      "SELECT * FROM stats ORDER BY date DESC LIMIT 1;"
+    // Get latest daily entry
+    const latestEntry = await client.query(
+      "SELECT * FROM daily_entries ORDER BY date DESC LIMIT 1"
     );
-
-    if (latestResult.rows.length === 0) {
-      // If no entries exist at all, return default stats
-      res.status(200).json({
-        health: 99,
-        energy: 99,
-        mental: 99,
-        charisma: 99,
-        intellect: 99,
-        skill: 99,
-        water: 0,
-        smoke: 0,
-        porn_streak: 0,
-        workout_streak: 0,
-        image: 1
-      });
-      return;
-    }
-
-    // Get the most recent non-zero values for each stat
-    const backfillQuery = `
-      SELECT 
-        COALESCE(NULLIF(t1.health, 0), (SELECT health FROM stats WHERE health != 0 AND health IS NOT NULL ORDER BY date DESC LIMIT 1)) as health,
-        COALESCE(NULLIF(t1.energy, 0), (SELECT energy FROM stats WHERE energy != 0 AND energy IS NOT NULL ORDER BY date DESC LIMIT 1)) as energy,
-        COALESCE(NULLIF(t1.mental, 0), (SELECT mental FROM stats WHERE mental != 0 AND mental IS NOT NULL ORDER BY date DESC LIMIT 1)) as mental,
-        COALESCE(NULLIF(t1.charisma, 0), (SELECT charisma FROM stats WHERE charisma != 0 AND charisma IS NOT NULL ORDER BY date DESC LIMIT 1)) as charisma,
-        COALESCE(NULLIF(t1.intellect, 0), (SELECT intellect FROM stats WHERE intellect != 0 AND intellect IS NOT NULL ORDER BY date DESC LIMIT 1)) as intellect,
-        COALESCE(NULLIF(t1.skill, 0), (SELECT skill FROM stats WHERE skill != 0 AND skill IS NOT NULL ORDER BY date DESC LIMIT 1)) as skill,
-        t1.*
-      FROM stats t1
-      WHERE t1.date = (SELECT MAX(date) FROM stats)
-    `;
-
-    const backfillResult = await client.query(backfillQuery);
-    const resultResponse = backfillResult.rows[0];
     
-    var image = 1;
-    if (resultResponse.health > 80) {
-      image = 2;
-    }
-    if (resultResponse.energy < 50) {
-      image = 3;
-    }
-    resultResponse.image = image;
+    // Get consistency metrics (last 7 days)
+    const consistencyResult = await client.query(
+      "SELECT COUNT(*) as entries_count FROM daily_entries WHERE date >= CURRENT_DATE - INTERVAL '7 days'"
+    );
     
-    res.status(200).json(resultResponse);
+    // Get active goals count
+    const goalsResult = await client.query(
+      "SELECT COUNT(*) as active_goals FROM goals WHERE status = 'active'"
+    );
+    
+    // Get active habits count
+    const habitsResult = await client.query(
+      "SELECT COUNT(*) as active_habits FROM habits WHERE status = 'active'"
+    );
+    
+    // Get habit streaks
+    const streaksResult = await client.query(
+      "SELECT title, current_streak, longest_streak FROM habits WHERE status = 'active' ORDER BY current_streak DESC LIMIT 5"
+    );
+    
+    const stats = {
+      latestEntry: latestEntry.rows[0] || null,
+      consistency: {
+        entriesLast7Days: parseInt(consistencyResult.rows[0].entries_count),
+        activeGoals: parseInt(goalsResult.rows[0].active_goals),
+        activeHabits: parseInt(habitsResult.rows[0].active_habits)
+      },
+      habitStreaks: streaksResult.rows
+    };
+    
+    res.status(200).json(stats);
   } catch (error) {
     console.error("Error fetching stats:", error);
-    res.status(500).send("Server error");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 7. Daily Entries History
+app.get("/api/daily-entries", async (req, res) => {
+  const { limit = 30 } = req.query;
+  
+  try {
+    const result = await client.query(
+      "SELECT * FROM daily_entries ORDER BY date DESC LIMIT $1",
+      [limit]
+    );
+    
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching daily entries:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 8. Goal Progress History
+app.get("/api/goals/:id/progress", async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const result = await client.query(
+      "SELECT * FROM goal_progress_logs WHERE goal_id = $1 ORDER BY logged_at DESC",
+      [id]
+    );
+    
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching goal progress:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 9. Habit Logs
+app.get("/api/habits/:id/logs", async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const result = await client.query(
+      "SELECT * FROM habit_logs WHERE habit_id = $1 ORDER BY completed_at DESC",
+      [id]
+    );
+    
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching habit logs:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
 // Start the server
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  console.log(`Life Progress Tracker running on http://localhost:${port}`);
 });
 
